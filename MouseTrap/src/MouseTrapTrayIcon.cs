@@ -1,4 +1,4 @@
-﻿using MouseTrap.Forms;
+using MouseTrap.Forms;
 using MouseTrap.Models;
 using MouseTrap.Service;
 
@@ -10,6 +10,8 @@ public class MouseTrapTrayIcon : TrayIcon {
     private WeakReference<ConfigFrom>? _configFromRef;
 
 
+    private GlobalHotkeyManager? _hotkeys;
+    private Form? _hotkeyForm;
     public MouseTrapTrayIcon(ServiceThread service)
     {
         _service = service;
@@ -33,6 +35,20 @@ public class MouseTrapTrayIcon : TrayIcon {
         ContextMenu.Items[0].Font = WithFontStyle(ContextMenu.Items[0].Font, FontStyle.Bold);
 
         Visible = true;
+        // initialize hotkeys using a minimal form
+        _hotkeyForm = new Form { ShowInTaskbar = false, WindowState = FormWindowState.Minimized, Opacity = 0 };
+        _hotkeyForm.Load += (s, e) => _hotkeyForm.Hide();
+        _hotkeyForm.Show();
+        _hotkeys = new GlobalHotkeyManager(_hotkeyForm.Handle);
+        _hotkeys.EnableRequested += () => {
+            _service.StartService();
+            ((ToolStripMenuItem)ContextMenu.Items[1]).Checked = true;
+        };
+        _hotkeys.DisableRequested += () => {
+            _service.StopService();
+            ((ToolStripMenuItem)ContextMenu.Items[1]).Checked = false;
+        };
+        _hotkeys.Register();
 
         // show config form on first startup
         var settings = Settings.Load();
@@ -77,6 +93,7 @@ public class MouseTrapTrayIcon : TrayIcon {
             Close();
         }
 
+        _hotkeys?.HandleWndProc(ref m);
         _service.WndProc(ref m);
 
         base.WndProc(ref m);
@@ -89,5 +106,15 @@ public class MouseTrapTrayIcon : TrayIcon {
     private static Font WithFontStyle(Font font, FontStyle style)
     {
         return new Font(font.Name, font.Size, style, font.Unit);
+    }
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _hotkeys?.Unregister();
+            _hotkeys?.Dispose();
+            _hotkeyForm?.Dispose();
+        }
+        base.Dispose(disposing);
     }
 }
