@@ -1,12 +1,95 @@
+using System.Runtime.InteropServices;
 using System.ComponentModel;
 using MouseTrap.Models;
 using MouseTrap.Native;
-
 
 namespace MouseTrap.Service;
 
 public class MouseBridgeService : IService {
     private ScreenConfigCollection _screens;
+
+    private bool _wasMouseDown = false;
+    private bool _suppressBridge = false;
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(Point pt);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    private const int WM_NCHITTEST = 0x84;
+    private const int HTVSCROLL = 7;
+    private const int HTCLIENT = 1;
+
+    private bool IsLeftMouseDown()
+    {
+        return (GetAsyncKeyState(0x01) & 0x8000) != 0;
+    }
+
+    private bool ShouldSuppressBridgeOnDrag(Point pos)
+    {
+        var hwnd = WindowFromPoint(pos);
+        if (hwnd == IntPtr.Zero)
+            return false;
+
+        int lParam = (pos.Y << 16) | (pos.X & 0xFFFF);
+        var result = (int)SendMessage(hwnd, WM_NCHITTEST, IntPtr.Zero, (IntPtr)lParam);
+
+        // 1. Classic native vertical scrollbar
+        if (result == HTVSCROLL)
+            return true;
+
+        // 2. Text editing controls
+        if (result == HTCLIENT && IsLeftMouseDown())
+        {
+            var className = new System.Text.StringBuilder(256);
+            if (GetClassName(hwnd, className, className.Capacity) > 0)
+            {
+                string classNameStr = className.ToString();
+                
+                if (classNameStr == "Edit" || 
+                    classNameStr.StartsWith("RichEdit") ||
+                    classNameStr == "WindowsForms10.EDIT.app.0" ||
+                    classNameStr == "TextBox" ||
+                    classNameStr == "Scintilla")
+                {
+                    return true;
+                }
+            }
+        }
+
+        // 3. Simple right-edge detection for modern scrollbars
+        if (IsLeftMouseDown() && GetWindowRect(hwnd, out RECT windowRect))
+        {
+            int distanceFromWindowRight = windowRect.Right - pos.X;
+            
+            // Within 50 pixels of the window's right edge
+            if (distanceFromWindowRight < 50 && distanceFromWindowRight > 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     public MouseBridgeService()
     {
@@ -52,11 +135,9 @@ public class MouseBridgeService : IService {
         MouseTrapClear();
     }
 
-
     private void Loop(CancellationToken token)
     {
         while (!token.IsCancellationRequested) {
-            // on win-logon etc..
             if (!Mouse.IsInputDesktop()) {
                 MouseTrapClear();
                 Thread.Sleep(1);
@@ -64,14 +145,32 @@ public class MouseBridgeService : IService {
             }
 
             var position = GetPosition();
+            var isDown = IsLeftMouseDown();
+            
+            var direction = GetDirection(in position);
+
+            if (isDown && !_wasMouseDown)
+            {
+                _suppressBridge = ShouldSuppressBridgeOnDrag(position);
+            }
+
+            if (!isDown)
+            {
+                _suppressBridge = false;
+            }
+
+            _wasMouseDown = isDown;
+
+            if (_suppressBridge)
+            {
+                Thread.Sleep(1);
+                continue;
+            }
 
             var current = _screens.FirstOrDefault(_ => _.Bounds.Contains(position));
             if (current != null && current.HasBridges) {
                 MouseTrap(current);
 
-                var direction = GetDirection(in position);
-
-                // ==>
                 var hotspace = current.RightHotSpace;
                 if (direction.HasFlag(Direction.ToRight) && hotspace.Contains(position)) {
                     var targetScreen = _screens.FirstOrDefault(_ => _.ScreenId == current.RightBridge!.TargetScreenId);
@@ -86,7 +185,6 @@ public class MouseBridgeService : IService {
                     }
                 }
 
-                // <==
                 hotspace = current.LeftHotSpace;
                 if (direction.HasFlag(Direction.ToLeft) && hotspace.Contains(position)) {
                     var targetScreen = _screens.FirstOrDefault(_ => _.ScreenId == current.LeftBridge!.TargetScreenId);
@@ -101,8 +199,6 @@ public class MouseBridgeService : IService {
                     }
                 }
 
-
-                // ^
                 hotspace = current.TopHotSpace;
                 if (direction.HasFlag(Direction.ToTop) && hotspace.Contains(position)) {
                     var targetScreen = _screens.FirstOrDefault(_ => _.ScreenId == current.TopBridge!.TargetScreenId);
@@ -117,7 +213,6 @@ public class MouseBridgeService : IService {
                     }
                 }
 
-                // v
                 hotspace = current.BottomHotSpace;
                 if (direction.HasFlag(Direction.ToBottom) && hotspace.Contains(position)) {
                     var targetScreen = _screens.FirstOrDefault(_ => _.ScreenId == current.BottomBridge!.TargetScreenId);
@@ -137,7 +232,6 @@ public class MouseBridgeService : IService {
         }
     }
 
-
     private Point GetPosition()
     {
         if (!Mouse.TryGetPosition(out var pos)) {
@@ -147,7 +241,6 @@ public class MouseBridgeService : IService {
         return pos;
     }
 
-
     private int _posOldx;
     private int _posOldy;
 
@@ -156,25 +249,21 @@ public class MouseBridgeService : IService {
         var ret = Direction.None;
         if (_posOldx < pos.X) {
             _posOldx = pos.X;
-
             ret |= Direction.ToRight;
         }
 
         if (_posOldx > pos.X) {
             _posOldx = pos.X;
-
             ret |= Direction.ToLeft;
         }
 
         if (_posOldy < pos.Y) {
             _posOldy = pos.Y;
-
             ret |= Direction.ToBottom;
         }
 
         if (_posOldy > pos.Y) {
             _posOldy = pos.Y;
-
             ret |= Direction.ToTop;
         }
 
@@ -221,8 +310,6 @@ public class MouseBridgeService : IService {
 
     private void MouseMove(in Rectangle srcBounds, in Rectangle targetBounds, int x, int y)
     {
-        // Mouse.SwitchToInputDesktop();
-
         Mouse.MoveCursor(x, y);
 
         var pos = GetPosition();
