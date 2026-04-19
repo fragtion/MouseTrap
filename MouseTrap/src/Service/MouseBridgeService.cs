@@ -1,12 +1,86 @@
+using System.Runtime.InteropServices;
 using System.ComponentModel;
 using MouseTrap.Models;
 using MouseTrap.Native;
-
 
 namespace MouseTrap.Service;
 
 public class MouseBridgeService : IService {
     private ScreenConfigCollection _screens;
+
+    private bool _wasMouseDown = false;
+    private bool _suppressBridge = false;
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(Point pt);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    private const int WM_NCHITTEST = 0x84;
+    private const int HTVSCROLL = 7;
+
+    private bool IsLeftMouseDown()
+    {
+        return (GetAsyncKeyState(0x01) & 0x8000) != 0;
+    }
+
+    private bool ShouldSuppressBridgeOnDrag(Point pos)
+    {
+        var hwnd = WindowFromPoint(pos);
+        if (hwnd == IntPtr.Zero)
+            return false;
+
+        // 1. Check for native/classic scrollbar via hit test
+        int lParam = (pos.Y << 16) | (pos.X & 0xFFFF);
+        var hitTest = (int)SendMessage(hwnd, WM_NCHITTEST, IntPtr.Zero, (IntPtr)lParam);
+        if (hitTest == HTVSCROLL)
+            return true;
+
+        // 2. Check window class - if it's a text control, suppress on any drag
+        var className = new System.Text.StringBuilder(256);
+        if (GetClassName(hwnd, className, className.Capacity) > 0)
+        {
+            string cn = className.ToString();
+            if (cn == "Edit" ||
+                cn.StartsWith("RichEdit") ||
+                cn == "Scintilla" ||
+                cn == "WindowsForms10.EDIT.app.0" ||
+                cn == "Chrome_RenderWidgetHostHWND" ||
+                cn == "MozillaWindowClass")
+            {
+                return true;
+            }
+        }
+
+        // 3. Right-edge heuristic for custom scrollbars
+        if (GetWindowRect(hwnd, out RECT windowRect))
+        {
+            int distanceFromRight = windowRect.Right - pos.X;
+            if (distanceFromRight < 50 && distanceFromRight > 0)
+                return true;
+        }
+
+        return false;
+    }
 
     public MouseBridgeService()
     {
@@ -52,11 +126,9 @@ public class MouseBridgeService : IService {
         MouseTrapClear();
     }
 
-
     private void Loop(CancellationToken token)
     {
         while (!token.IsCancellationRequested) {
-            // on win-logon etc..
             if (!Mouse.IsInputDesktop()) {
                 MouseTrapClear();
                 Thread.Sleep(1);
@@ -64,6 +136,25 @@ public class MouseBridgeService : IService {
             }
 
             var position = GetPosition();
+            var isDown = IsLeftMouseDown();
+
+            if (isDown && !_wasMouseDown)
+            {
+                _suppressBridge = ShouldSuppressBridgeOnDrag(position);
+            }
+
+            if (!isDown)
+            {
+                _suppressBridge = false;
+            }
+
+            _wasMouseDown = isDown;
+
+            if (_suppressBridge)
+            {
+                Thread.Sleep(1);
+                continue;
+            }
 
             var current = _screens.FirstOrDefault(_ => _.Bounds.Contains(position));
             if (current != null && current.HasBridges) {
@@ -101,7 +192,6 @@ public class MouseBridgeService : IService {
                     }
                 }
 
-
                 // ^
                 hotspace = current.TopHotSpace;
                 if (direction.HasFlag(Direction.ToTop) && hotspace.Contains(position)) {
@@ -137,7 +227,6 @@ public class MouseBridgeService : IService {
         }
     }
 
-
     private Point GetPosition()
     {
         if (!Mouse.TryGetPosition(out var pos)) {
@@ -147,7 +236,6 @@ public class MouseBridgeService : IService {
         return pos;
     }
 
-
     private int _posOldx;
     private int _posOldy;
 
@@ -156,25 +244,21 @@ public class MouseBridgeService : IService {
         var ret = Direction.None;
         if (_posOldx < pos.X) {
             _posOldx = pos.X;
-
             ret |= Direction.ToRight;
         }
 
         if (_posOldx > pos.X) {
             _posOldx = pos.X;
-
             ret |= Direction.ToLeft;
         }
 
         if (_posOldy < pos.Y) {
             _posOldy = pos.Y;
-
             ret |= Direction.ToBottom;
         }
 
         if (_posOldy > pos.Y) {
             _posOldy = pos.Y;
-
             ret |= Direction.ToTop;
         }
 
