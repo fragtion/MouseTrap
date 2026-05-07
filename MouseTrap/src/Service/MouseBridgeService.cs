@@ -72,6 +72,10 @@ public class MouseBridgeService : IService {
 
     private bool ShouldSuppressBridgeOnDrag(Point pos)
     {
+        // If we have an I-beam cursor, suppress bridging (text selection/cursor placement)
+        if (IsIBeamCursor())
+            return true;
+
         var hwnd = WindowFromPoint(pos);
         if (hwnd == IntPtr.Zero)
             return false;
@@ -90,9 +94,7 @@ public class MouseBridgeService : IService {
             if (cn == "Edit" ||
                 cn.StartsWith("RichEdit") ||
                 cn == "Scintilla" ||
-                cn == "WindowsForms10.EDIT.app.0" ||
-                cn == "Chrome_RenderWidgetHostHWND" ||
-                cn == "MozillaWindowClass")
+                cn == "WindowsForms10.EDIT.app.0")
             {
                 return true;
             }
@@ -105,11 +107,6 @@ public class MouseBridgeService : IService {
             if (distanceFromRight < 50 && distanceFromRight > 0)
                 return true;
         }
-
-        // 4. Cursor shape fallback — catches CMD, PuTTY, and anything else
-        //    with an I-beam that we didn't explicitly enumerate
-        if (IsIBeamCursor())
-            return true;
 
         return false;
     }
